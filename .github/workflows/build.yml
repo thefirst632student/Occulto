@@ -1,0 +1,89 @@
+name: Build Release x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-release-x64:
+    name: Build MetadataParser.exe and GameAssembly.dll
+    runs-on: windows-2022
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,18.0)'
+          msbuild-architecture: x64
+
+      - name: Build MetadataParser Release x64
+        shell: pwsh
+        run: |
+          msbuild .\MetadataParser\MetadataParser.sln `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:PlatformToolset=v143 `
+            /p:PreferredToolArchitecture=x64
+
+      - name: Build GameAssembly Release x64
+        shell: pwsh
+        run: |
+          msbuild .\Middleware\Middleware.sln `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:PlatformToolset=v143 `
+            /p:PreferredToolArchitecture=x64
+
+      - name: Collect binary artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+
+          $metadataParser = Get-ChildItem -Path .\MetadataParser -Recurse -File -Filter MetadataParser.exe |
+            Where-Object { $_.FullName -like '*\x64\Release\*' } |
+            Select-Object -First 1
+
+          $gameAssembly = Get-ChildItem -Path .\Middleware -Recurse -File -Filter GameAssembly.dll |
+            Where-Object { $_.FullName -like '*\x64\Release\*' } |
+            Select-Object -First 1
+
+          if (-not $metadataParser) {
+            throw 'MetadataParser.exe was not found under MetadataParser/**/x64/Release/** after build.'
+          }
+
+          if (-not $gameAssembly) {
+            throw 'GameAssembly.dll was not found under Middleware/**/x64/Release/** after build.'
+          }
+
+          Copy-Item -LiteralPath $metadataParser.FullName -Destination .\artifacts\MetadataParser.exe -Force
+          Copy-Item -LiteralPath $gameAssembly.FullName -Destination .\artifacts\GameAssembly.dll -Force
+
+          Get-ChildItem .\artifacts | Format-Table Name, Length, FullName
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Occulto-Release-x64
+          path: |
+            artifacts/MetadataParser.exe
+            artifacts/GameAssembly.dll
+          if-no-files-found: error
