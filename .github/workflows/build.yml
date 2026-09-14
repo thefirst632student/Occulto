@@ -1,6 +1,6 @@
 name: Build Release x64 Self-contained
 
-on:
+'on':
   workflow_dispatch:
   push:
     branches:
@@ -31,48 +31,61 @@ jobs:
           vs-version: '[17.0,18.0)'
           msbuild-architecture: x64
 
-      - name: Force static MSVC runtime for Release x64
+      - name: Patch Release x64 projects for static MSVC runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          python -c @'
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as ET
 
-          $projects = @(
-            '.\MetadataParser\MetadataParser\MetadataParser.vcxproj',
-            '.\Middleware\Middleware\Middleware.vcxproj'
-          )
+          projects = [
+              Path("MetadataParser/MetadataParser/MetadataParser.vcxproj"),
+              Path("Middleware/Middleware/Middleware.vcxproj"),
+          ]
 
-          $releaseX64Condition = "'`$(Configuration)|`$(Platform)'=='Release|x64'"
+          release_x64_condition = "'$(Configuration)|$(Platform)'=='Release|x64'"
 
-          foreach ($projectPath in $projects) {
-            [xml]$project = Get-Content -LiteralPath $projectPath
-            $namespace = $project.Project.NamespaceURI
-            $namespaceManager = New-Object System.Xml.XmlNamespaceManager($project.NameTable)
-            $namespaceManager.AddNamespace('msb', $namespace)
+          for project_path in projects:
+              if not project_path.exists():
+                  raise FileNotFoundError(f"Project file not found: {project_path}")
 
-            $itemDefinitionGroup = $project.SelectNodes('//msb:ItemDefinitionGroup', $namespaceManager) |
-              Where-Object { $_.GetAttribute('Condition') -eq $releaseX64Condition } |
-              Select-Object -First 1
+              tree = ET.parse(project_path)
+              root = tree.getroot()
 
-            if (-not $itemDefinitionGroup) {
-              throw "Release|x64 ItemDefinitionGroup was not found in $projectPath"
-            }
+              if root.tag.startswith("{"):
+                  namespace = root.tag.split("}", 1)[0][1:]
+                  ET.register_namespace("", namespace)
+                  def tag(name: str) -> str:
+                      return f"{{{namespace}}}{name}"
+              else:
+                  def tag(name: str) -> str:
+                      return name
 
-            $clCompile = $itemDefinitionGroup.SelectSingleNode('msb:ClCompile', $namespaceManager)
-            if (-not $clCompile) {
-              $clCompile = $project.CreateElement('ClCompile', $namespace)
-              [void]$itemDefinitionGroup.AppendChild($clCompile)
-            }
+              item_definition_group = None
+              for node in root.findall(tag("ItemDefinitionGroup")):
+                  if node.attrib.get("Condition") == release_x64_condition:
+                      item_definition_group = node
+                      break
 
-            $runtimeLibrary = $clCompile.SelectSingleNode('msb:RuntimeLibrary', $namespaceManager)
-            if (-not $runtimeLibrary) {
-              $runtimeLibrary = $project.CreateElement('RuntimeLibrary', $namespace)
-              [void]$clCompile.AppendChild($runtimeLibrary)
-            }
+              if item_definition_group is None:
+                  raise RuntimeError(
+                      f"Release|x64 ItemDefinitionGroup was not found in {project_path}"
+                  )
 
-            $runtimeLibrary.InnerText = 'MultiThreaded'
-            $project.Save((Resolve-Path -LiteralPath $projectPath))
-            Write-Host "Patched $projectPath -> RuntimeLibrary=MultiThreaded (/MT) for Release|x64"
-          }
+              cl_compile = item_definition_group.find(tag("ClCompile"))
+              if cl_compile is None:
+                  cl_compile = ET.SubElement(item_definition_group, tag("ClCompile"))
+
+              runtime_library = cl_compile.find(tag("RuntimeLibrary"))
+              if runtime_library is None:
+                  runtime_library = ET.SubElement(cl_compile, tag("RuntimeLibrary"))
+
+              runtime_library.text = "MultiThreaded"
+              tree.write(project_path, encoding="utf-8", xml_declaration=True)
+              print(f"Patched {project_path}: RuntimeLibrary=MultiThreaded (/MT) for Release|x64")
+          '@
 
       - name: Show patched runtime settings
         shell: pwsh
@@ -171,7 +184,7 @@ jobs:
             }
 
             $dependents = & $dumpbin.FullName /DEPENDENTS $binary | Out-String
-            Write-Host "Dependencies for $binary:"
+            Write-Host "Dependencies for ${binary}:"
             Write-Host $dependents
 
             if ($dependents -match $forbiddenRuntimeDlls) {
