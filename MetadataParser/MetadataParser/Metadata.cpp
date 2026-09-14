@@ -22,11 +22,23 @@ namespace
         uint32_t MethodCount;
         uint32_t PropertyCount;
         uint32_t FieldCount;
+        uint32_t MethodRecordSize;
+        uint32_t ParameterStartInMethod;
+        uint32_t ParameterCountInMethod;
+        bool HashParameters;
     };
 
-    // Some metadata v24 sub-variants differ by one early uint32 field. Try both.
-    const TypeLayout LAYOUT_88 = { "v24_88", 88, 0, 32, 36, 44, 64, 66, 68 };
-    const TypeLayout LAYOUT_92 = { "v24_92_byref", 92, 0, 36, 40, 48, 68, 70, 72 };
+    // Some metadata v24 sub-variants differ.
+    const TypeLayout LAYOUT_88 = { "v24_88", 88, 0, 32, 36, 44, 64, 66, 68, sizeof(Metadata::MethodDefinition), 16, 34, true };
+    const TypeLayout LAYOUT_92 = { "v24_92_byref", 92, 0, 36, 40, 48, 68, 70, 72, sizeof(Metadata::MethodDefinition), 16, 34, true };
+
+    // ReZeroDeathKiss / Unity 2018 metadata v24 layout discovered by metadata_member_probe3.py.
+    // TypeDefinitionsSize=458536, recordSize=104, typeCount=4409.
+    // FIELD:    fieldStart @ 48, fieldCount @ 84, table count 25593.
+    // METHOD:   methodStart @ 52, methodCount @ 80, method record size 32, table count 52568.
+    // PROPERTY: propertyStart @ 60, propertyCount @ 82, table count 7429.
+    // Parameter offsets inside the 32-byte method record are not trusted here, so parameter hashing is disabled.
+    const TypeLayout LAYOUT_104_REZERO = { "v24_104_rezero_probe3", 104, 0, 48, 52, 60, 80, 82, 84, 32, 0, 0, false };
 
     struct Stats
     {
@@ -161,16 +173,26 @@ namespace
         return ReadU32(static_cast<size_t>(g_header->ParametersOffset) + static_cast<size_t>(parameterIndex) * sizeof(Metadata::ParameterDefinition), nameIndex);
     }
 
-    bool ReadMethod(uint32_t methodIndex, uint32_t& nameIndex, uint32_t& parameterStart, uint16_t& parameterCount)
+    bool ReadMethod(const TypeLayout& layout, uint32_t methodIndex, uint32_t& nameIndex, uint32_t& parameterStart, uint16_t& parameterCount)
     {
-        const uint32_t total = SectionCount(g_header->MethodsSize, sizeof(Metadata::MethodDefinition));
+        const uint32_t total = SectionCount(g_header->MethodsSize, layout.MethodRecordSize);
         if (methodIndex >= total)
             return false;
 
-        const size_t off = static_cast<size_t>(g_header->MethodsOffset) + static_cast<size_t>(methodIndex) * sizeof(Metadata::MethodDefinition);
-        return ReadU32(off + 0, nameIndex)
-            && ReadU32(off + 16, parameterStart)
-            && ReadU16(off + 34, parameterCount);
+        const size_t off = static_cast<size_t>(g_header->MethodsOffset) + static_cast<size_t>(methodIndex) * layout.MethodRecordSize;
+        if (!ReadU32(off + 0, nameIndex))
+            return false;
+
+        parameterStart = 0;
+        parameterCount = 0;
+        if (layout.HashParameters)
+        {
+            if (!ReadU32(off + layout.ParameterStartInMethod, parameterStart)
+                || !ReadU16(off + layout.ParameterCountInMethod, parameterCount))
+                return false;
+        }
+
+        return true;
     }
 
     bool HashNameByIndex(uint32_t nameIndex, const char* category, const std::string& owner, Stats& stats, bool skipDots = false)
@@ -224,7 +246,7 @@ namespace
 
         const uint32_t typeCount = SectionCount(g_header->TypeDefinitionsSize, layout.RecordSize);
         const uint32_t fieldTotal = SectionCount(g_header->FieldsSize, sizeof(Metadata::FieldDefinition));
-        const uint32_t methodTotal = SectionCount(g_header->MethodsSize, sizeof(Metadata::MethodDefinition));
+        const uint32_t methodTotal = SectionCount(g_header->MethodsSize, layout.MethodRecordSize);
         const uint32_t propertyTotal = SectionCount(g_header->PropertiesSize, sizeof(Metadata::PropertyDefinition));
 
         int score = 0;
@@ -262,8 +284,23 @@ namespace
     {
         const int score88 = ScoreLayout(LAYOUT_88);
         const int score92 = ScoreLayout(LAYOUT_92);
-        printf("Layout score: %s=%d, %s=%d\n", LAYOUT_88.Name, score88, LAYOUT_92.Name, score92);
-        return score92 > score88 ? LAYOUT_92 : LAYOUT_88;
+        const int score104 = ScoreLayout(LAYOUT_104_REZERO);
+        printf("Layout score: %s=%d, %s=%d, %s=%d\n",
+            LAYOUT_88.Name, score88, LAYOUT_92.Name, score92, LAYOUT_104_REZERO.Name, score104);
+
+        const TypeLayout* best = &LAYOUT_88;
+        int bestScore = score88;
+        if (score92 > bestScore)
+        {
+            best = &LAYOUT_92;
+            bestScore = score92;
+        }
+        if (score104 > bestScore)
+        {
+            best = &LAYOUT_104_REZERO;
+            bestScore = score104;
+        }
+        return *best;
     }
 
     bool ProcessType(const TypeLayout& layout, uint32_t index, Stats& stats)
@@ -311,7 +348,7 @@ namespace
             return true;
 
         const uint32_t fieldTotal = SectionCount(g_header->FieldsSize, sizeof(Metadata::FieldDefinition));
-        const uint32_t methodTotal = SectionCount(g_header->MethodsSize, sizeof(Metadata::MethodDefinition));
+        const uint32_t methodTotal = SectionCount(g_header->MethodsSize, layout.MethodRecordSize);
         const uint32_t parameterTotal = SectionCount(g_header->ParametersSize, sizeof(Metadata::ParameterDefinition));
         const uint32_t propertyTotal = SectionCount(g_header->PropertiesSize, sizeof(Metadata::PropertyDefinition));
 
@@ -336,7 +373,7 @@ namespace
             {
                 uint32_t methodNameIndex = 0, parameterStart = 0;
                 uint16_t parameterCount = 0;
-                if (!ReadMethod(methodStart + i, methodNameIndex, parameterStart, parameterCount))
+                if (!ReadMethod(layout, methodStart + i, methodNameIndex, parameterStart, parameterCount))
                 {
                     ++stats.SkippedInvalid;
                     continue;
@@ -345,18 +382,21 @@ namespace
                 if (HashNameByIndex(methodNameIndex, "method", typeName, stats, true))
                     ++stats.ModifiedMethods;
 
-                if (ValidIndexRange(parameterStart, parameterCount, parameterTotal))
+                if (layout.HashParameters)
                 {
-                    for (uint32_t p = 0; p < parameterCount; ++p)
+                    if (ValidIndexRange(parameterStart, parameterCount, parameterTotal))
                     {
-                        uint32_t paramNameIndex = 0;
-                        if (GetParameterNameIndex(parameterStart + p, paramNameIndex) && HashNameByIndex(paramNameIndex, "param", typeName, stats))
-                            ++stats.ModifiedParams;
+                        for (uint32_t p = 0; p < parameterCount; ++p)
+                        {
+                            uint32_t paramNameIndex = 0;
+                            if (GetParameterNameIndex(parameterStart + p, paramNameIndex) && HashNameByIndex(paramNameIndex, "param", typeName, stats))
+                                ++stats.ModifiedParams;
+                        }
                     }
-                }
-                else
-                {
-                    ++stats.SkippedInvalid;
+                    else
+                    {
+                        ++stats.SkippedInvalid;
+                    }
                 }
             }
         }
@@ -461,7 +501,8 @@ bool Metadata::Process(std::vector<uint8_t>& buffer)
 
     const TypeLayout& layout = ChooseLayout();
     const uint32_t typeCount = SectionCount(g_header->TypeDefinitionsSize, layout.RecordSize);
-    printf("Chosen type layout: %s, recordSize=%u, types=%u\n", layout.Name, layout.RecordSize, typeCount);
+    printf("Chosen type layout: %s, recordSize=%u, types=%u, methodRecordSize=%u, hashParams=%s\n",
+        layout.Name, layout.RecordSize, typeCount, layout.MethodRecordSize, layout.HashParameters ? "yes" : "no");
 
     Stats stats;
     for (uint32_t i = 0; i < typeCount; ++i)
