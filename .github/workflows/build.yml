@@ -1,4 +1,4 @@
-name: Build Release x64
+name: Build Release x64 Self-contained
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ on:
 
 jobs:
   build-release-x64:
-    name: Build MetadataParser.exe and GameAssembly.dll
+    name: Build self-contained MetadataParser.exe and GameAssembly.dll
     runs-on: windows-2022
 
     permissions:
@@ -31,6 +31,55 @@ jobs:
           vs-version: '[17.0,18.0)'
           msbuild-architecture: x64
 
+      - name: Force static MSVC runtime for Release x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $projects = @(
+            '.\MetadataParser\MetadataParser\MetadataParser.vcxproj',
+            '.\Middleware\Middleware\Middleware.vcxproj'
+          )
+
+          $releaseX64Condition = "'`$(Configuration)|`$(Platform)'=='Release|x64'"
+
+          foreach ($projectPath in $projects) {
+            [xml]$project = Get-Content -LiteralPath $projectPath
+            $namespace = $project.Project.NamespaceURI
+            $namespaceManager = New-Object System.Xml.XmlNamespaceManager($project.NameTable)
+            $namespaceManager.AddNamespace('msb', $namespace)
+
+            $itemDefinitionGroup = $project.SelectNodes('//msb:ItemDefinitionGroup', $namespaceManager) |
+              Where-Object { $_.GetAttribute('Condition') -eq $releaseX64Condition } |
+              Select-Object -First 1
+
+            if (-not $itemDefinitionGroup) {
+              throw "Release|x64 ItemDefinitionGroup was not found in $projectPath"
+            }
+
+            $clCompile = $itemDefinitionGroup.SelectSingleNode('msb:ClCompile', $namespaceManager)
+            if (-not $clCompile) {
+              $clCompile = $project.CreateElement('ClCompile', $namespace)
+              [void]$itemDefinitionGroup.AppendChild($clCompile)
+            }
+
+            $runtimeLibrary = $clCompile.SelectSingleNode('msb:RuntimeLibrary', $namespaceManager)
+            if (-not $runtimeLibrary) {
+              $runtimeLibrary = $project.CreateElement('RuntimeLibrary', $namespace)
+              [void]$clCompile.AppendChild($runtimeLibrary)
+            }
+
+            $runtimeLibrary.InnerText = 'MultiThreaded'
+            $project.Save((Resolve-Path -LiteralPath $projectPath))
+            Write-Host "Patched $projectPath -> RuntimeLibrary=MultiThreaded (/MT) for Release|x64"
+          }
+
+      - name: Show patched runtime settings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Select-String -Path .\MetadataParser\MetadataParser\MetadataParser.vcxproj,.\Middleware\Middleware\Middleware.vcxproj -Pattern '<RuntimeLibrary>|MultiThreaded' -Context 2,2
+
       - name: Build MetadataParser Release x64
         shell: pwsh
         run: |
@@ -39,7 +88,8 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:PlatformToolset=v143 `
-            /p:PreferredToolArchitecture=x64
+            /p:PreferredToolArchitecture=x64 `
+            /p:UseDebugLibraries=false
 
       - name: Build GameAssembly Release x64
         shell: pwsh
@@ -49,7 +99,8 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:PlatformToolset=v143 `
-            /p:PreferredToolArchitecture=x64
+            /p:PreferredToolArchitecture=x64 `
+            /p:UseDebugLibraries=false
 
       - name: Collect binary artifacts
         shell: pwsh
@@ -60,10 +111,12 @@ jobs:
 
           $metadataParser = Get-ChildItem -Path .\MetadataParser -Recurse -File -Filter MetadataParser.exe |
             Where-Object { $_.FullName -like '*\x64\Release\*' } |
+            Sort-Object FullName |
             Select-Object -First 1
 
           $gameAssembly = Get-ChildItem -Path .\Middleware -Recurse -File -Filter GameAssembly.dll |
             Where-Object { $_.FullName -like '*\x64\Release\*' } |
+            Sort-Object FullName |
             Select-Object -First 1
 
           if (-not $metadataParser) {
@@ -79,10 +132,57 @@ jobs:
 
           Get-ChildItem .\artifacts | Format-Table Name, Length, FullName
 
+      - name: Verify x64 and self-contained CRT dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $vsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) {
+            throw 'Visual Studio installation with VC x64 tools was not found.'
+          }
+
+          $dumpbin = Get-ChildItem -Path (Join-Path $vsPath 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match '\\bin\\Hostx64\\x64\\dumpbin\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          if (-not $dumpbin) {
+            throw 'dumpbin.exe was not found.'
+          }
+
+          $binaries = @(
+            '.\artifacts\MetadataParser.exe',
+            '.\artifacts\GameAssembly.dll'
+          )
+
+          $forbiddenRuntimeDlls = '(?i)\b(VCRUNTIME|MSVCP|CONCRT|ucrtbase)\S*\.dll\b'
+
+          foreach ($binary in $binaries) {
+            if (-not (Test-Path -LiteralPath $binary)) {
+              throw "Missing binary: $binary"
+            }
+
+            $headers = & $dumpbin.FullName /HEADERS $binary | Out-String
+            if ($headers -notmatch 'machine \(x64\)') {
+              Write-Host $headers
+              throw "$binary is not an x64 binary."
+            }
+
+            $dependents = & $dumpbin.FullName /DEPENDENTS $binary | Out-String
+            Write-Host "Dependencies for $binary:"
+            Write-Host $dependents
+
+            if ($dependents -match $forbiddenRuntimeDlls) {
+              throw "$binary imports MSVC/UCRT runtime DLLs. Static CRT (/MT) self-contained check failed."
+            }
+          }
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Occulto-Release-x64
+          name: Occulto-Release-x64-self-contained
           path: |
             artifacts/MetadataParser.exe
             artifacts/GameAssembly.dll
