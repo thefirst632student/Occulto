@@ -40,42 +40,6 @@ namespace Metadata
         uint16_t ParameterCount;
     } MethodDefinition;
 
-    typedef struct _TypeDefinition
-    {
-        uint32_t NameIndex;
-        uint32_t NamespaceIndex;
-        uint32_t ByvalTypeIndex;
-
-        uint32_t DeclaringTypeIndex;
-        uint32_t ParentIndex;
-        uint32_t ElementTypeIndex;
-
-        uint32_t GenericContainerIndex;
-
-        uint32_t Flags;
-
-        uint32_t FieldStart;
-        uint32_t MethodStart;
-        uint32_t EventStart;
-        uint32_t PropertyStart;
-        uint32_t NestedTypesStart;
-        uint32_t InterfacesStart;
-        uint32_t VtableStart;
-        uint32_t InterfaceOffsetsStart;
-
-        uint16_t MethodCount;
-        uint16_t PropertyCount;
-        uint16_t FieldCount;
-        uint16_t EventCount;
-        uint16_t NestedTypeCount;
-        uint16_t VtableCount;
-        uint16_t InterfacesCount;
-        uint16_t InterfaceOffsetsCount;
-
-        uint32_t Bitfield;
-        uint32_t Token;
-    } TypeDefinition;
-
 #pragma pack(push, p1, 4)
     typedef struct _Header
     {
@@ -146,51 +110,11 @@ namespace Metadata
     } Header;
 #pragma pack(pop, p1)
 
-    inline Header* header = nullptr;
-    inline uint32_t typeCount = 0;
-
-    template<typename T>
-    inline T Offset(size_t sectionOffset, size_t itemIndex)
-    {
-        return reinterpret_cast<T>(reinterpret_cast<uint8_t*>(header) + sectionOffset) + itemIndex;
-    }
-
-    inline char* GetStringFromIndex(uint32_t index)
-    {
-        return Offset<char*>(header->StringOffset, index);
-    }
-
-    inline TypeDefinition* GetTypeDefinitionFromIndex(uint32_t index)
-    {
-        return Offset<TypeDefinition*>(header->TypeDefinitionsOffset, index);
-    }
-
-    inline ParameterDefinition* GetParameterDefinitionFromIndex(uint32_t index)
-    {
-        return Offset<ParameterDefinition*>(header->ParametersOffset, index);
-    }
-
-    inline MethodDefinition* GetMethodDefinitionFromIndex(uint32_t index)
-    {
-        return Offset<MethodDefinition*>(header->MethodsOffset, index);
-    }
-
-    inline PropertyDefinition* GetPropertyDefinitionFromIndex(uint32_t index)
-    {
-        return Offset<PropertyDefinition*>(header->PropertiesOffset, index);
-    }
-
-    inline FieldDefinition* GetFieldDefinitionFromIndex(uint32_t index)
-    {
-        return Offset<FieldDefinition*>(header->FieldsOffset, index);
-    }
-
     bool IsInternalType(const std::string& name);
 
-    void ModifyField(FieldDefinition* field);
-    void ModifyParameter(ParameterDefinition* parameter);
-    void ModifyMethod(MethodDefinition* method);
-    void ModifyProperty(PropertyDefinition* property);
-    void ModifyType(TypeDefinition* type);
+    // Optional flags are set by Entry.cpp.
+    void SetTypeOnly(bool value);
+    void SetVerbose(bool value);
+
     bool Process(std::vector<uint8_t>& buffer);
 }

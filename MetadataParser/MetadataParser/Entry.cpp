@@ -4,8 +4,19 @@ int main(int argc, char* argv[])
 {
     if (argc < 3)
     {
-        printf("Invalid arguments\n");
+        printf("Usage: MetadataParser.exe <config.txt> <global-metadata.dat> [--type-only] [--verbose]\n");
         return EXIT_FAILURE;
+    }
+
+    for (int i = 3; i < argc; ++i)
+    {
+        std::string arg(argv[i]);
+        if (arg == "--type-only")
+            Metadata::SetTypeOnly(true);
+        else if (arg == "--verbose")
+            Metadata::SetVerbose(true);
+        else
+            printf("Unknown option ignored: %s\n", argv[i]);
     }
 
     printf("Reading config...\n");
@@ -36,4 +47,7 @@ int main(int argc, char* argv[])
         printf("Failed to write metadata\n");
         return EXIT_FAILURE;
     }
+
+    printf("Done. Output: %s.protec\n", argv[2]);
+    return EXIT_SUCCESS;
 }
