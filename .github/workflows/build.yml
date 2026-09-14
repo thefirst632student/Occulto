@@ -1,6 +1,6 @@
-name: Build Release x64 Self-contained
+name: Build Release x64 VS2022 Self-contained
 
-'on':
+on:
   workflow_dispatch:
   push:
     branches:
@@ -14,8 +14,8 @@ name: Build Release x64 Self-contained
       - master
 
 jobs:
-  build-release-x64:
-    name: Build self-contained MetadataParser.exe and GameAssembly.dll
+  build-release-x64-vs2022:
+    name: Build MetadataParser.exe and GameAssembly.dll with VS2022
     runs-on: windows-2022
 
     permissions:
@@ -25,11 +25,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
+      - name: Setup VS2022 MSBuild
         uses: microsoft/setup-msbuild@v2
         with:
           vs-version: '[17.0,18.0)'
           msbuild-architecture: x64
+
+      - name: Verify Visual Studio 2022 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $vsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsPath = & $vsWhere `
+            -version '[17.0,18.0)' `
+            -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
+          if (-not $vsPath) {
+            throw 'Visual Studio 2022 with VC++ x64 tools was not found.'
+          }
+
+          Write-Host "Visual Studio 2022 path: ${vsPath}"
+          msbuild -version
 
       - name: Patch Release x64 projects for static MSVC runtime
         shell: pwsh
@@ -37,7 +56,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -c @'
           from pathlib import Path
-          import sys
           import xml.etree.ElementTree as ET
 
           projects = [
@@ -91,29 +109,38 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Select-String -Path .\MetadataParser\MetadataParser\MetadataParser.vcxproj,.\Middleware\Middleware\Middleware.vcxproj -Pattern '<RuntimeLibrary>|MultiThreaded' -Context 2,2
+          Select-String `
+            -Path .\MetadataParser\MetadataParser\MetadataParser.vcxproj,.\Middleware\Middleware\Middleware.vcxproj `
+            -Pattern '<RuntimeLibrary>|MultiThreaded' `
+            -Context 2,2
 
-      - name: Build MetadataParser Release x64
+      - name: Build MetadataParser Release x64 with VS2022
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           msbuild .\MetadataParser\MetadataParser.sln `
             /m `
+            /restore `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:PlatformToolset=v143 `
             /p:PreferredToolArchitecture=x64 `
-            /p:UseDebugLibraries=false
+            /p:UseDebugLibraries=false `
+            /p:WindowsTargetPlatformVersion=10.0
 
-      - name: Build GameAssembly Release x64
+      - name: Build GameAssembly Release x64 with VS2022
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           msbuild .\Middleware\Middleware.sln `
             /m `
+            /restore `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:PlatformToolset=v143 `
             /p:PreferredToolArchitecture=x64 `
-            /p:UseDebugLibraries=false
+            /p:UseDebugLibraries=false `
+            /p:WindowsTargetPlatformVersion=10.0
 
       - name: Collect binary artifacts
         shell: pwsh
@@ -151,9 +178,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           $vsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vsPath = & $vsWhere `
+            -version '[17.0,18.0)' `
+            -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
           if (-not $vsPath) {
-            throw 'Visual Studio installation with VC x64 tools was not found.'
+            throw 'Visual Studio 2022 installation with VC x64 tools was not found.'
           }
 
           $dumpbin = Get-ChildItem -Path (Join-Path $vsPath 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe |
@@ -174,13 +206,13 @@ jobs:
 
           foreach ($binary in $binaries) {
             if (-not (Test-Path -LiteralPath $binary)) {
-              throw "Missing binary: $binary"
+              throw "Missing binary: ${binary}"
             }
 
             $headers = & $dumpbin.FullName /HEADERS $binary | Out-String
             if ($headers -notmatch 'machine \(x64\)') {
               Write-Host $headers
-              throw "$binary is not an x64 binary."
+              throw "${binary} is not an x64 binary."
             }
 
             $dependents = & $dumpbin.FullName /DEPENDENTS $binary | Out-String
@@ -188,14 +220,14 @@ jobs:
             Write-Host $dependents
 
             if ($dependents -match $forbiddenRuntimeDlls) {
-              throw "$binary imports MSVC/UCRT runtime DLLs. Static CRT (/MT) self-contained check failed."
+              throw "${binary} imports MSVC/UCRT runtime DLLs. Static CRT (/MT) self-contained check failed."
             }
           }
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Occulto-Release-x64-self-contained
+          name: Occulto-Release-x64-VS2022-self-contained
           path: |
             artifacts/MetadataParser.exe
             artifacts/GameAssembly.dll
