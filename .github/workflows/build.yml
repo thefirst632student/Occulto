@@ -106,31 +106,19 @@ jobs:
               tree.write(project_path, encoding="utf-8", xml_declaration=True)
               print(f"Patched {project_path}: RuntimeLibrary=MultiThreaded (/MT) for Release|x64")
 
-          def add_middleware_source() -> None:
+          def add_middleware_sources() -> None:
               project_path = Path("Middleware/Middleware/Middleware.vcxproj")
               tree, root, tag = load_project(project_path)
 
-              candidates = [
-                  Path("Middleware/Middleware/Occulto_MissingUnity2018Exports.cpp"),
-                  Path("Middleware/Occulto_MissingUnity2018Exports.cpp"),
+              source_candidates = [
+                  [
+                      Path("Middleware/Middleware/Occulto_MissingUnity2018Exports.cpp"),
+                      Path("Middleware/Occulto_MissingUnity2018Exports.cpp"),
+                  ],
+                  [
+                      Path("Middleware/Middleware/Hooks.cpp"),
+                  ],
               ]
-
-              source_path = next((p for p in candidates if p.exists()), None)
-              if source_path is None:
-                  searched = ", ".join(str(p) for p in candidates)
-                  raise FileNotFoundError(
-                      "Occulto_MissingUnity2018Exports.cpp was not found. "
-                      f"Searched: {searched}"
-                  )
-
-              include_value = os.path.relpath(source_path, project_path.parent).replace("/", "\\")
-              include_norm = include_value.replace("/", "\\").lower()
-
-              for node in root.findall(f".//{tag('ClCompile')}"):
-                  existing = node.attrib.get("Include", "").replace("/", "\\").lower()
-                  if existing == include_norm:
-                      print(f"{source_path} is already included in {project_path} as {include_value}")
-                      return
 
               item_group = None
               for group in root.findall(tag("ItemGroup")):
@@ -141,9 +129,34 @@ jobs:
               if item_group is None:
                   item_group = ET.SubElement(root, tag("ItemGroup"))
 
-              ET.SubElement(item_group, tag("ClCompile"), {"Include": include_value})
-              tree.write(project_path, encoding="utf-8", xml_declaration=True)
-              print(f"Patched {project_path}: added ClCompile Include={include_value}")
+              changed = False
+              existing_includes = {
+                  node.attrib.get("Include", "").replace("/", "\\").lower()
+                  for node in root.findall(f".//{tag('ClCompile')}")
+              }
+
+              for candidates in source_candidates:
+                  source_path = next((p for p in candidates if p.exists()), None)
+                  if source_path is None:
+                      searched = ", ".join(str(p) for p in candidates)
+                      raise FileNotFoundError(f"Middleware source file was not found. Searched: {searched}")
+
+                  include_value = os.path.relpath(source_path, project_path.parent).replace("/", "\\")
+                  include_norm = include_value.replace("/", "\\").lower()
+
+                  if include_norm in existing_includes:
+                      print(f"{source_path} is already included in {project_path} as {include_value}")
+                      continue
+
+                  ET.SubElement(item_group, tag("ClCompile"), {"Include": include_value})
+                  existing_includes.add(include_norm)
+                  changed = True
+                  print(f"Patched {project_path}: added ClCompile Include={include_value}")
+
+              if changed:
+                  tree.write(project_path, encoding="utf-8", xml_declaration=True)
+              else:
+                  print(f"No Middleware source patch was needed for {project_path}")
 
           for path in [
               Path("MetadataParser/MetadataParser/MetadataParser.vcxproj"),
@@ -151,7 +164,7 @@ jobs:
           ]:
               set_static_runtime(path)
 
-          add_middleware_source()
+          add_middleware_sources()
           '@
 
       - name: Show patched project settings
@@ -160,7 +173,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Select-String `
             -Path .\MetadataParser\MetadataParser\MetadataParser.vcxproj,.\Middleware\Middleware\Middleware.vcxproj `
-            -Pattern '<RuntimeLibrary>|MultiThreaded|Occulto_MissingUnity2018Exports.cpp' `
+            -Pattern '<RuntimeLibrary>|MultiThreaded|Occulto_MissingUnity2018Exports.cpp|Hooks.cpp' `
             -Context 2,2
 
       - name: Build MetadataParser Release x64 with VS2022
